@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, url_for
 import paramiko
 import pandas as pd
 import psycopg2
@@ -6,25 +6,13 @@ import requests
 from io import StringIO
 from datetime import datetime
 
-#jegf
-
 app = Flask(__name__)
 
+@app.route('/')
+def home():
+    return render_template('index.html')
 
-@app.route('/hello', methods=['GET', 'POST'])
-def hello_world():
-    if request.method == 'POST':
-        data = request.get_json()
-        name = data.get('name', 'World')
-    else:
-        name = request.args.get('name', 'World')
-
-    return jsonify({"message": f"Hello, {name}!"})
-
-
-@app.route('/get-csv', methods=['POST'])
-def get_csv():
-    data = request.json
+def fetch_csv_data(data, from_date_str=None, max_rows=None):
     HOST = data['host']
     PORT = int(data.get('port', 22))
     USERNAME = data['username']
@@ -32,51 +20,55 @@ def get_csv():
     FOLDER = data['folder']
     FILENAME = data['filename']
 
-    max_rows = request.args.get('rows')
-    from_date_str = request.args.get('from_date')  # expects format: YYYY-MM-DD
+    transport = paramiko.Transport((HOST, PORT))
+    transport.connect(username=USERNAME, password=PASSWORD)
+    sftp = paramiko.SFTPClient.from_transport(transport)
 
+    full_path = f"{FOLDER}/{FILENAME}"
+    with sftp.file(full_path, 'r') as file:
+        content = file.read().decode()
+
+    sftp.close()
+    transport.close()
+
+    df = pd.read_csv(StringIO(content))
+    df['ticketgroup_create_datetime'] = pd.to_datetime(
+        df['ticketgroup_create_datetime'], errors='coerce')
+
+    if from_date_str:
+        from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
+        df = df[df['ticketgroup_create_datetime'] >= from_date]
+
+    if max_rows:
+        max_rows = int(max_rows)
+        df = df.head(max_rows)
+
+    return df
+
+@app.route('/fetch-csv', methods=['POST'])
+def fetch_csv():
     try:
-        # Step 1: Read CSV from SFTP
-        transport = paramiko.Transport((HOST, PORT))
-        transport.connect(username=USERNAME, password=PASSWORD)
-        sftp = paramiko.SFTPClient.from_transport(transport)
+        data = request.json
+        from_date_str = request.args.get('from_date')
+        max_rows = request.args.get('rows')
 
-        full_path = f"{FOLDER}/{FILENAME}"
-        with sftp.file(full_path, 'r') as file:
-            content = file.read().decode()
+        df = fetch_csv_data(data, from_date_str, max_rows)
+        return df.to_json(orient='records')
 
-        sftp.close()
-        transport.close()
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-        df = pd.read_csv(StringIO(content))
-        df['ticketgroup_create_datetime'] = pd.to_datetime(
-            df['ticketgroup_create_datetime'], errors='coerce')
+@app.route('/insert-csv', methods=['POST'])
+def insert_csv():
+    try:
+        data = request.json
+        from_date_str = request.args.get('from_date')
+        max_rows = request.args.get('rows')
 
-        if from_date_str:
-            try:
-                from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
-                df = df[df['ticketgroup_create_datetime'] >= from_date]
-            except ValueError:
-                return jsonify({
-                    "status":
-                    "error",
-                    "message":
-                    "Invalid date format. Use YYYY-MM-DD."
-                }), 400
+        df = fetch_csv_data(data, from_date_str, max_rows)
 
-        if max_rows:
-            try:
-                max_rows = int(max_rows)
-                df = df.head(max_rows)
-            except ValueError:
-                return jsonify({
-                    "status":
-                    "error",
-                    "message":
-                    "Invalid rows parameter. It must be an integer."
-                }), 400
-
-        # Step 2: Insert into PostgreSQL
         db_config = {
             "host": "35.224.109.158",
             "database": "ttDB",
@@ -91,7 +83,6 @@ def get_csv():
         df = df.where(pd.notnull(df), None)
         df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None})
 
-        # Only cast known int4 columns
         cast_to_int = [
             "TICKETGROUP_ID", "PRIMARY_PERFORMER_ID", "SECONDARY_PERFORMER_ID",
             "INVOICE_ID", "PO_ID", "INVOICE_NUMBER", "ENTITY_ID", "VENUE_ID",
@@ -100,8 +91,7 @@ def get_csv():
         ]
         for col in cast_to_int:
             if col in df.columns:
-                df[col] = df[col].apply(lambda x: int(float(x))
-                                        if x is not None else None)
+                df[col] = df[col].apply(lambda x: int(float(x)) if x is not None else None)
 
         columns = list(df.columns)
         colnames = ', '.join(f'"{col.upper()}"' for col in columns)
@@ -115,9 +105,7 @@ def get_csv():
             except Exception as e:
                 print(f"\n🚨 ERROR ON ROW {row_num}:")
                 for i, value in enumerate(row):
-                    print(
-                        f" - Column: {columns[i]} | Value: {value} | Type: {type(value)}"
-                    )
+                    print(f" - Column: {columns[i]} | Value: {value} | Type: {type(value)}")
                 print("❌ Full error:", e)
                 raise
 
@@ -127,9 +115,10 @@ def get_csv():
 
         return jsonify({"status": "success", "inserted_rows": len(rows)})
 
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 @app.route('/query-db', methods=['GET'])
 def query_db():
@@ -157,7 +146,6 @@ def query_db():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route('/get-my-ip', methods=['GET'])
 def get_my_ip():
     try:
@@ -166,6 +154,15 @@ def get_my_ip():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route('/hello', methods=['GET', 'POST'])
+def hello_world():
+    if request.method == 'POST':
+        data = request.get_json()
+        name = data.get('name', 'World')
+    else:
+        name = request.args.get('name', 'World')
+
+    return jsonify({"message": f"Hello, {name}!"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=80)

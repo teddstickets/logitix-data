@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TeddsTickets API</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+
+        #logo {
+            width: 180px;
+        }
+
+        .data-item {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <img id="logo" src="{{ url_for('static', filename='assets/logo.png') }}" alt="TeddsTickets Logo">
+    <h1>TeddsTickets API Viewer</h1>
+
+    <div id="data-container">
+        <p>Loading data from <code>/query-db</code>...</p>
+    </div>
+
+    <script>
+        fetch("/query-db")
+            .then(response => response.json())
+            .then(result => {
+                const container = document.getElementById("data-container");
+                container.innerHTML = ""; // Clear default text
+
+                if (result.status === "success") {
+                    result.rows.forEach(row => {
+                        const div = document.createElement("div");
+                        div.className = "data-item";
+                        div.textContent = JSON.stringify(row, null, 2);
+                        container.appendChild(div);
+                    });
+                } else {
+                    container.innerHTML = `<p>Error: ${result.message}</p>`;
+                }
+            })
+            .catch(err => {
+                document.getElementById("data-container").innerHTML = `<p>Error fetching data: ${err.message}</p>`;
+            });
+    </script>
+</body>
+</html>
